@@ -5,7 +5,7 @@
  * version 2.0 (the "License"); you may not use this file except in compliance
  * with the License. You may obtain a copy of the License at:
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *   https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
@@ -24,6 +24,7 @@ import io.netty.channel.SelectStrategy;
 import io.netty.channel.SingleThreadEventLoop;
 import io.netty.util.IntSupplier;
 import io.netty.util.concurrent.RejectedExecutionHandler;
+import io.netty.util.internal.ObjectUtil;
 import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.ReflectionUtil;
 import io.netty.util.internal.SystemPropertyUtil;
@@ -43,6 +44,7 @@ import java.security.PrivilegedAction;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
+import java.util.NoSuchElementException;
 import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.Executor;
@@ -75,22 +77,25 @@ public final class NioEventLoop extends SingleThreadEventLoop {
     // Workaround for JDK NIO bug.
     //
     // See:
-    // - http://bugs.sun.com/view_bug.do?bug_id=6427854
+    // - https://bugs.openjdk.java.net/browse/JDK-6427854 for first few dev (unreleased) builds of JDK 7
+    // - https://bugs.openjdk.java.net/browse/JDK-6527572 for JDK prior to 5.0u15-rev and 6u10
     // - https://github.com/netty/netty/issues/203
     static {
-        final String key = "sun.nio.ch.bugLevel";
-        final String bugLevel = SystemPropertyUtil.get(key);
-        if (bugLevel == null) {
-            try {
-                AccessController.doPrivileged(new PrivilegedAction<Void>() {
-                    @Override
-                    public Void run() {
-                        System.setProperty(key, "");
-                        return null;
-                    }
-                });
-            } catch (final SecurityException e) {
-                logger.debug("Unable to get/set System Property: " + key, e);
+        if (PlatformDependent.javaVersion() < 7) {
+            final String key = "sun.nio.ch.bugLevel";
+            final String bugLevel = SystemPropertyUtil.get(key);
+            if (bugLevel == null) {
+                try {
+                    AccessController.doPrivileged(new PrivilegedAction<Void>() {
+                        @Override
+                        public Void run() {
+                            System.setProperty(key, "");
+                            return null;
+                        }
+                    });
+                } catch (final SecurityException e) {
+                    logger.debug("Unable to get/set System Property: " + key, e);
+                }
             }
         }
 
@@ -133,20 +138,14 @@ public final class NioEventLoop extends SingleThreadEventLoop {
 
     NioEventLoop(NioEventLoopGroup parent, Executor executor, SelectorProvider selectorProvider,
                  SelectStrategy strategy, RejectedExecutionHandler rejectedExecutionHandler,
-                 EventLoopTaskQueueFactory queueFactory) {
-        super(parent, executor, false, newTaskQueue(queueFactory), newTaskQueue(queueFactory),
+                 EventLoopTaskQueueFactory taskQueueFactory, EventLoopTaskQueueFactory tailTaskQueueFactory) {
+        super(parent, executor, false, newTaskQueue(taskQueueFactory), newTaskQueue(tailTaskQueueFactory),
                 rejectedExecutionHandler);
-        if (selectorProvider == null) {
-            throw new NullPointerException("selectorProvider");
-        }
-        if (strategy == null) {
-            throw new NullPointerException("selectStrategy");
-        }
-        provider = selectorProvider;
+        this.provider = ObjectUtil.checkNotNull(selectorProvider, "selectorProvider");
+        this.selectStrategy = ObjectUtil.checkNotNull(strategy, "selectStrategy");
         final SelectorTuple selectorTuple = openSelector();
-        selector = selectorTuple.selector;
-        unwrappedSelector = selectorTuple.unwrappedSelector;
-        selectStrategy = strategy;
+        this.selector = selectorTuple.selector;
+        this.unwrappedSelector = selectorTuple.unwrappedSelector;
     }
 
     private static Queue<Runnable> newTaskQueue(
@@ -291,9 +290,7 @@ public final class NioEventLoop extends SingleThreadEventLoop {
      * be executed by this event loop when the {@link SelectableChannel} is ready.
      */
     public void register(final SelectableChannel ch, final int interestOps, final NioTask<?> task) {
-        if (ch == null) {
-            throw new NullPointerException("ch");
-        }
+        ObjectUtil.checkNotNull(ch, "ch");
         if (interestOps == 0) {
             throw new IllegalArgumentException("interestOps must be non-zero.");
         }
@@ -301,9 +298,7 @@ public final class NioEventLoop extends SingleThreadEventLoop {
             throw new IllegalArgumentException(
                     "invalid interestOps: " + interestOps + "(validOps: " + ch.validOps() + ')');
         }
-        if (task == null) {
-            throw new NullPointerException("task");
-        }
+        ObjectUtil.checkNotNull(task, "task");
 
         if (isShutdown()) {
             throw new IllegalStateException("event loop shut down");
@@ -376,6 +371,71 @@ public final class NioEventLoop extends SingleThreadEventLoop {
     @Override
     public int registeredChannels() {
         return selector.keys().size() - cancelledKeys;
+    }
+
+    @Override
+    public Iterator<Channel> registeredChannelsIterator() {
+        assert inEventLoop();
+        final Set<SelectionKey> keys = selector.keys();
+        if (keys.isEmpty()) {
+            return ChannelsReadOnlyIterator.empty();
+        }
+        return new Iterator<Channel>() {
+            final Iterator<SelectionKey> selectionKeyIterator =
+                    ObjectUtil.checkNotNull(keys, "selectionKeys")
+                            .iterator();
+            Channel next;
+            boolean isDone;
+
+            @Override
+            public boolean hasNext() {
+                if (isDone) {
+                    return false;
+                }
+                Channel cur = next;
+                if (cur == null) {
+                    cur = next = nextOrDone();
+                    return cur != null;
+                }
+                return true;
+            }
+
+            @Override
+            public Channel next() {
+                if (isDone) {
+                    throw new NoSuchElementException();
+                }
+                Channel cur = next;
+                if (cur == null) {
+                    cur = nextOrDone();
+                    if (cur == null) {
+                        throw new NoSuchElementException();
+                    }
+                }
+                next = nextOrDone();
+                return cur;
+            }
+
+            @Override
+            public void remove() {
+                throw new UnsupportedOperationException("remove");
+            }
+
+            private Channel nextOrDone() {
+                Iterator<SelectionKey> it = selectionKeyIterator;
+                while (it.hasNext()) {
+                    SelectionKey key = it.next();
+                    if (key.isValid()) {
+                        Object attachment = key.attachment();
+                        if (attachment instanceof AbstractNioChannel) {
+                            return (AbstractNioChannel) attachment;
+                        }
+                    }
+                }
+                isDone = true;
+                return null;
+            }
+        };
     }
 
     private void rebuildSelector0() {
@@ -509,11 +569,7 @@ public final class NioEventLoop extends SingleThreadEventLoop {
                     ranTasks = runAllTasks(0); // This will run the minimum number of tasks
                 }
 
-                if (ranTasks || strategy > 0) {
-                    if (selectCnt > MIN_PREMATURE_SELECTOR_RETURNS && logger.isDebugEnabled()) {
-                        logger.debug("Selector.select() returned prematurely {} times in a row for Selector {}.",
-                                selectCnt - 1, selector);
-                    }
+                if (selectReturnPrematurely(selectCnt, ranTasks, strategy)) {
                     selectCnt = 0;
                 } else if (unexpectedSelectorWakeup(selectCnt)) { // Unexpected wakeup (unusual case)
                     selectCnt = 0;
@@ -524,21 +580,38 @@ public final class NioEventLoop extends SingleThreadEventLoop {
                     logger.debug(CancelledKeyException.class.getSimpleName() + " raised by a Selector {} - JDK bug?",
                             selector, e);
                 }
+            } catch (Error e) {
+                throw e;
             } catch (Throwable t) {
                 handleLoopException(t);
-            }
-            // Always handle shutdown even if the loop processing threw an exception.
-            try {
-                if (isShuttingDown()) {
-                    closeAll();
-                    if (confirmShutdown()) {
-                        return;
+            } finally {
+                // Always handle shutdown even if the loop processing threw an exception.
+                try {
+                    if (isShuttingDown()) {
+                        closeAll();
+                        if (confirmShutdown()) {
+                            return;
+                        }
                     }
+                } catch (Error e) {
+                    throw e;
+                } catch (Throwable t) {
+                    handleLoopException(t);
                 }
-            } catch (Throwable t) {
-                handleLoopException(t);
             }
         }
+    }
+
+    // returns true if selectCnt should be reset
+    private boolean selectReturnPrematurely(int selectCnt, boolean ranTasks, int strategy) {
+        if (ranTasks || strategy > 0) {
+            if (selectCnt > MIN_PREMATURE_SELECTOR_RETURNS && logger.isDebugEnabled()) {
+                logger.debug("Selector.select() returned prematurely {} times in a row for Selector {}.",
+                    selectCnt - 1, selector);
+            }
+            return true;
+        }
+        return false;
     }
 
     // returns true if selectCnt should be reset
@@ -714,7 +787,7 @@ public final class NioEventLoop extends SingleThreadEventLoop {
             // Process OP_WRITE first as we may be able to write some queued buffers and so free memory.
             if ((readyOps & SelectionKey.OP_WRITE) != 0) {
                 // Call forceFlush which will also take care of clear the OP_WRITE once there is nothing left to write
-                ch.unsafe().forceFlush();
+               unsafe.forceFlush();
             }
 
             // Also check for readOps of 0 to workaround possible JDK bug which may otherwise lead
@@ -747,6 +820,8 @@ public final class NioEventLoop extends SingleThreadEventLoop {
                     invokeChannelUnregistered(task, k, null);
                 }
                 break;
+            default:
+                 break;
             }
         }
     }

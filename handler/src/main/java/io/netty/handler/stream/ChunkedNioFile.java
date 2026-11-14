@@ -5,7 +5,7 @@
  * version 2.0 (the "License"); you may not use this file except in compliance
  * with the License. You may obtain a copy of the License at:
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *   https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
@@ -19,7 +19,9 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.FileRegion;
+import io.netty.util.internal.ObjectUtil;
 
+import java.io.EOFException;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
@@ -31,7 +33,7 @@ import java.nio.channels.FileChannel;
  * NIO {@link FileChannel}.
  * <p>
  * If your operating system supports
- * <a href="http://en.wikipedia.org/wiki/Zero-copy">zero-copy file transfer</a>
+ * <a href="https://en.wikipedia.org/wiki/Zero-copy">zero-copy file transfer</a>
  * such as {@code sendfile()}, you might want to use {@link FileRegion} instead.
  */
 public class ChunkedNioFile implements ChunkedInput<ByteBuf> {
@@ -86,22 +88,10 @@ public class ChunkedNioFile implements ChunkedInput<ByteBuf> {
      */
     public ChunkedNioFile(FileChannel in, long offset, long length, int chunkSize)
             throws IOException {
-        if (in == null) {
-            throw new NullPointerException("in");
-        }
-        if (offset < 0) {
-            throw new IllegalArgumentException(
-                    "offset: " + offset + " (expected: 0 or greater)");
-        }
-        if (length < 0) {
-            throw new IllegalArgumentException(
-                    "length: " + length + " (expected: 0 or greater)");
-        }
-        if (chunkSize <= 0) {
-            throw new IllegalArgumentException(
-                    "chunkSize: " + chunkSize +
-                    " (expected: a positive integer)");
-        }
+        ObjectUtil.checkNotNull(in, "in");
+        ObjectUtil.checkPositiveOrZero(offset, "offset");
+        ObjectUtil.checkPositiveOrZero(length, "length");
+        ObjectUtil.checkPositive(chunkSize, "chunkSize");
         if (!in.isOpen()) {
             throw new ClosedChannelException();
         }
@@ -163,7 +153,11 @@ public class ChunkedNioFile implements ChunkedInput<ByteBuf> {
             for (;;) {
                 int localReadBytes = buffer.writeBytes(in, offset + readBytes, chunkSize - readBytes);
                 if (localReadBytes < 0) {
-                    break;
+                    // The file is shorter than the region we were asked to transfer (for example it was truncated
+                    // after this ChunkedNioFile was created). Fail like ChunkedFile instead of returning empty
+                    // chunks forever, as isEndOfInput() would never return true.
+                    throw new EOFException("Underlying file size " + in.size() + " smaller than requested end " +
+                            "offset " + endOffset);
                 }
                 readBytes += localReadBytes;
                 if (readBytes == chunkSize) {

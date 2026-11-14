@@ -5,7 +5,7 @@
  * version 2.0 (the "License"); you may not use this file except in compliance
  * with the License. You may obtain a copy of the License at:
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *   https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
@@ -15,6 +15,7 @@
  */
 package io.netty.handler.codec;
 
+import static io.netty.util.internal.ObjectUtil.checkNotNull;
 import static io.netty.util.internal.ObjectUtil.checkPositive;
 import static io.netty.util.internal.ObjectUtil.checkPositiveOrZero;
 
@@ -23,7 +24,6 @@ import java.util.List;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.handler.codec.serialization.ObjectDecoder;
 
 /**
  * A decoder that splits the received {@link ByteBuf}s dynamically by the
@@ -197,6 +197,7 @@ public class LengthFieldBasedFrameDecoder extends ByteToMessageDecoder {
     private boolean discardingTooLongFrame;
     private long tooLongFrameLength;
     private long bytesToDiscard;
+    private int frameLengthInt = -1;
 
     /**
      * Creates a new instance.
@@ -301,9 +302,8 @@ public class LengthFieldBasedFrameDecoder extends ByteToMessageDecoder {
     public LengthFieldBasedFrameDecoder(
             ByteOrder byteOrder, int maxFrameLength, int lengthFieldOffset, int lengthFieldLength,
             int lengthAdjustment, int initialBytesToStrip, boolean failFast) {
-        if (byteOrder == null) {
-            throw new NullPointerException("byteOrder");
-        }
+
+        this.byteOrder = checkNotNull(byteOrder, "byteOrder");
 
         checkPositive(maxFrameLength, "maxFrameLength");
 
@@ -319,12 +319,11 @@ public class LengthFieldBasedFrameDecoder extends ByteToMessageDecoder {
                     "lengthFieldLength (" + lengthFieldLength + ").");
         }
 
-        this.byteOrder = byteOrder;
         this.maxFrameLength = maxFrameLength;
         this.lengthFieldOffset = lengthFieldOffset;
         this.lengthFieldLength = lengthFieldLength;
         this.lengthAdjustment = lengthAdjustment;
-        lengthFieldEndOffset = lengthFieldOffset + lengthFieldLength;
+        this.lengthFieldEndOffset = lengthFieldOffset + lengthFieldLength;
         this.initialBytesToStrip = initialBytesToStrip;
         this.failFast = failFast;
     }
@@ -396,40 +395,46 @@ public class LengthFieldBasedFrameDecoder extends ByteToMessageDecoder {
      *                          be created.
      */
     protected Object decode(ChannelHandlerContext ctx, ByteBuf in) throws Exception {
-        if (discardingTooLongFrame) {
-            discardingTooLongFrame(in);
-        }
+        long frameLength = 0;
+        if (frameLengthInt == -1) { // new frame
 
-        if (in.readableBytes() < lengthFieldEndOffset) {
+            if (discardingTooLongFrame) {
+                discardingTooLongFrame(in);
+            }
+
+            if (in.readableBytes() < lengthFieldEndOffset) {
+                return null;
+            }
+
+            int actualLengthFieldOffset = in.readerIndex() + lengthFieldOffset;
+            frameLength = getUnadjustedFrameLength(in, actualLengthFieldOffset, lengthFieldLength, byteOrder);
+
+            if (frameLength < 0) {
+                failOnNegativeLengthField(in, frameLength, lengthFieldEndOffset);
+            }
+
+            frameLength += lengthAdjustment + lengthFieldEndOffset;
+
+            if (frameLength < lengthFieldEndOffset) {
+                failOnFrameLengthLessThanLengthFieldEndOffset(in, frameLength, lengthFieldEndOffset);
+            }
+
+            if (frameLength > maxFrameLength) {
+                exceededFrameLength(in, frameLength);
+                return null;
+            }
+            // never overflows because it's less than maxFrameLength
+            frameLengthInt = (int) frameLength;
+        }
+        if (in.readableBytes() < frameLengthInt) { // frameLengthInt exist , just check buf
             return null;
         }
-
-        int actualLengthFieldOffset = in.readerIndex() + lengthFieldOffset;
-        long frameLength = getUnadjustedFrameLength(in, actualLengthFieldOffset, lengthFieldLength, byteOrder);
-
-        if (frameLength < 0) {
-            failOnNegativeLengthField(in, frameLength, lengthFieldEndOffset);
-        }
-
-        frameLength += lengthAdjustment + lengthFieldEndOffset;
-
-        if (frameLength < lengthFieldEndOffset) {
-            failOnFrameLengthLessThanLengthFieldEndOffset(in, frameLength, lengthFieldEndOffset);
-        }
-
-        if (frameLength > maxFrameLength) {
-            exceededFrameLength(in, frameLength);
-            return null;
-        }
-
-        // never overflows because it's less than maxFrameLength
-        int frameLengthInt = (int) frameLength;
-        if (in.readableBytes() < frameLengthInt) {
-            return null;
-        }
-
         if (initialBytesToStrip > frameLengthInt) {
-            failOnFrameLengthLessThanInitialBytesToStrip(in, frameLength, initialBytesToStrip);
+            // Reset the state before failing so the next frame is decoded again. Use frameLengthInt, as frameLength
+            // is 0 if the length field was decoded by a previous call.
+            int frameLengthToSkip = frameLengthInt;
+            frameLengthInt = -1;
+            failOnFrameLengthLessThanInitialBytesToStrip(in, frameLengthToSkip, initialBytesToStrip);
         }
         in.skipBytes(initialBytesToStrip);
 
@@ -438,6 +443,7 @@ public class LengthFieldBasedFrameDecoder extends ByteToMessageDecoder {
         int actualFrameLength = frameLengthInt - initialBytesToStrip;
         ByteBuf frame = extractFrame(ctx, in, readerIndex, actualFrameLength);
         in.readerIndex(readerIndex + actualFrameLength);
+        frameLengthInt = -1; // start processing the next frame
         return frame;
     }
 

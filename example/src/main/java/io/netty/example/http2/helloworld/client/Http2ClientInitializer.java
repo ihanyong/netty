@@ -5,7 +5,7 @@
  * "License"); you may not use this file except in compliance with the License. You may obtain a
  * copy of the License at:
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software distributed under the License
  * is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
@@ -68,7 +68,8 @@ public class Http2ClientInitializer extends ChannelInitializer<SocketChannel> {
                         new InboundHttp2ToHttpAdapterBuilder(connection)
                                 .maxContentLength(maxContentLength)
                                 .propagateSettings(true)
-                                .build()))
+                                .build(),
+                        maxContentLength))
                 .frameLogger(logger)
                 .connection(connection)
                 .build();
@@ -98,7 +99,8 @@ public class Http2ClientInitializer extends ChannelInitializer<SocketChannel> {
      */
     private void configureSsl(SocketChannel ch) {
         ChannelPipeline pipeline = ch.pipeline();
-        pipeline.addLast(sslCtx.newHandler(ch.alloc()));
+        // Specify Host in SSLContext New Handler to add TLS SNI Extension
+        pipeline.addLast(sslCtx.newHandler(ch.alloc(), Http2Client.HOST, Http2Client.PORT));
         // We must wait for the handshake to finish and the protocol to be negotiated before configuring
         // the HTTP/2 components of the pipeline.
         pipeline.addLast(new ApplicationProtocolNegotiationHandler("") {
@@ -122,7 +124,8 @@ public class Http2ClientInitializer extends ChannelInitializer<SocketChannel> {
     private void configureClearText(SocketChannel ch) {
         HttpClientCodec sourceCodec = new HttpClientCodec();
         Http2ClientUpgradeCodec upgradeCodec = new Http2ClientUpgradeCodec(connectionHandler);
-        HttpClientUpgradeHandler upgradeHandler = new HttpClientUpgradeHandler(sourceCodec, upgradeCodec, 65536);
+        HttpClientUpgradeHandler upgradeHandler = new HttpClientUpgradeHandler(sourceCodec, upgradeCodec,
+                maxContentLength);
 
         ch.pipeline().addLast(sourceCodec,
                               upgradeHandler,

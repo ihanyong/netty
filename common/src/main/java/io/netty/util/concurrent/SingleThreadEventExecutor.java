@@ -5,7 +5,7 @@
  * version 2.0 (the "License"); you may not use this file except in compliance
  * with the License. You may obtain a copy of the License at:
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *   https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
@@ -19,9 +19,9 @@ import io.netty.util.internal.ObjectUtil;
 import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.SystemPropertyUtil;
 import io.netty.util.internal.ThreadExecutorMap;
-import io.netty.util.internal.UnstableApi;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
+import org.jetbrains.annotations.Async.Schedule;
 
 import java.lang.Thread.State;
 import java.util.ArrayList;
@@ -169,7 +169,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         this.maxPendingTasks = DEFAULT_MAX_PENDING_EXECUTOR_TASKS;
         this.executor = ThreadExecutorMap.apply(executor, this);
         this.taskQueue = ObjectUtil.checkNotNull(taskQueue, "taskQueue");
-        rejectedExecutionHandler = ObjectUtil.checkNotNull(rejectedHandler, "rejectedHandler");
+        this.rejectedExecutionHandler = ObjectUtil.checkNotNull(rejectedHandler, "rejectedHandler");
     }
 
     /**
@@ -269,6 +269,9 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
                 }
 
                 if (task != null) {
+                    if (task == WAKEUP_TASK) {
+                        return null;
+                    }
                     return task;
                 }
             }
@@ -279,7 +282,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         if (scheduledTaskQueue == null || scheduledTaskQueue.isEmpty()) {
             return true;
         }
-        long nanoTime = AbstractScheduledEventExecutor.nanoTime();
+        long nanoTime = getCurrentTimeNanos();
         for (;;) {
             Runnable scheduledTask = pollScheduledTask(nanoTime);
             if (scheduledTask == null) {
@@ -300,7 +303,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         if (scheduledTaskQueue == null || scheduledTaskQueue.isEmpty()) {
             return false;
         }
-        long nanoTime = AbstractScheduledEventExecutor.nanoTime();
+        long nanoTime = getCurrentTimeNanos();
         Runnable scheduledTask = pollScheduledTask(nanoTime);
         if (scheduledTask == null) {
             return false;
@@ -329,9 +332,6 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
 
     /**
      * Return the number of tasks that are pending for processing.
-     *
-     * <strong>Be aware that this operation may be expensive as it depends on the internal implementation of the
-     * SingleThreadEventExecutor. So use it with care!</strong>
      */
     public int pendingTasks() {
         return taskQueue.size();
@@ -342,9 +342,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
      * before.
      */
     protected void addTask(Runnable task) {
-        if (task == null) {
-            throw new NullPointerException("task");
-        }
+        ObjectUtil.checkNotNull(task, "task");
         if (!offerTask(task)) {
             reject(task);
         }
@@ -361,10 +359,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
      * @see Queue#remove(Object)
      */
     protected boolean removeTask(Runnable task) {
-        if (task == null) {
-            throw new NullPointerException("task");
-        }
-        return taskQueue.remove(task);
+        return taskQueue.remove(ObjectUtil.checkNotNull(task, "task"));
     }
 
     /**
@@ -385,7 +380,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         } while (!fetchedAll); // keep on processing until we fetched all scheduled tasks.
 
         if (ranAtLeastOne) {
-            lastExecutionTime = ScheduledFutureTask.nanoTime();
+            lastExecutionTime = getCurrentTimeNanos();
         }
         afterRunningAllTasks();
         return ranAtLeastOne;
@@ -410,7 +405,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         } while (ranAtLeastOneTask && ++drainAttempt < maxDrainAttempts);
 
         if (drainAttempt > 0) {
-            lastExecutionTime = ScheduledFutureTask.nanoTime();
+            lastExecutionTime = getCurrentTimeNanos();
         }
         afterRunningAllTasks();
 
@@ -470,7 +465,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
             return false;
         }
 
-        final long deadline = timeoutNanos > 0 ? ScheduledFutureTask.nanoTime() + timeoutNanos : 0;
+        final long deadline = timeoutNanos > 0 ? getCurrentTimeNanos() + timeoutNanos : 0;
         long runTasks = 0;
         long lastExecutionTime;
         for (;;) {
@@ -481,7 +476,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
             // Check timeout every 64 tasks because nanoTime() is relatively expensive.
             // XXX: Hard-coded value - will make it configurable if it is really a problem.
             if ((runTasks & 0x3F) == 0) {
-                lastExecutionTime = ScheduledFutureTask.nanoTime();
+                lastExecutionTime = getCurrentTimeNanos();
                 if (lastExecutionTime >= deadline) {
                     break;
                 }
@@ -489,7 +484,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
 
             task = pollTask();
             if (task == null) {
-                lastExecutionTime = ScheduledFutureTask.nanoTime();
+                lastExecutionTime = getCurrentTimeNanos();
                 break;
             }
         }
@@ -502,13 +497,14 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
     /**
      * Invoked before returning from {@link #runAllTasks()} and {@link #runAllTasks(long)}.
      */
-    @UnstableApi
     protected void afterRunningAllTasks() { }
 
     /**
      * Returns the amount of time left until the scheduled task with the closest dead line is executed.
      */
     protected long delayNanos(long currentTimeNanos) {
+        currentTimeNanos -= initialNanoTime();
+
         ScheduledFutureTask<?> scheduledTask = peekScheduledTask();
         if (scheduledTask == null) {
             return SCHEDULE_PURGE_INTERVAL;
@@ -518,14 +514,13 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
     }
 
     /**
-     * Returns the absolute point in time (relative to {@link #nanoTime()}) at which the the next
+     * Returns the absolute point in time (relative to {@link #getCurrentTimeNanos()}) at which the next
      * closest scheduled task should run.
      */
-    @UnstableApi
     protected long deadlineNanos() {
         ScheduledFutureTask<?> scheduledTask = peekScheduledTask();
         if (scheduledTask == null) {
-            return nanoTime() + SCHEDULE_PURGE_INTERVAL;
+            return getCurrentTimeNanos() + SCHEDULE_PURGE_INTERVAL;
         }
         return scheduledTask.deadlineNanos();
     }
@@ -538,11 +533,20 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
      * checks.
      */
     protected void updateLastExecutionTime() {
-        lastExecutionTime = ScheduledFutureTask.nanoTime();
+        lastExecutionTime = getCurrentTimeNanos();
     }
 
     /**
+     * Runs the task-processing loop until {@link #confirmShutdown()} returns {@code true}.
      *
+     * <p>Implementations <strong>must not let a {@link Throwable} thrown by a task escape this
+     * method</strong>: any uncaught {@link Throwable} terminates the executor (logged at {@code WARN}
+     * and surfaced via {@link #terminationFuture()}), at which point every {@code Channel}
+     * registered with this executor stops processing I/O and new task submissions are rejected.
+     * The supplied helpers - {@link #runAllTasks()}, {@link #runAllTasks(long)}, and
+     * {@link #safeExecute(Runnable)} - catch {@code Throwable} for you; custom loops built on
+     * {@link #pollTask()} or {@link #takeTask()} are responsible for wrapping each task
+     * invocation accordingly.
      */
     protected abstract void run();
 
@@ -606,7 +610,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
             shutdownHooks.clear();
             for (Runnable task: copy) {
                 try {
-                    task.run();
+                    runTask(task);
                 } catch (Throwable t) {
                     logger.warn("Shutdown hook raised an exception.", t);
                 } finally {
@@ -616,7 +620,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         }
 
         if (ran) {
-            lastExecutionTime = ScheduledFutureTask.nanoTime();
+            lastExecutionTime = getCurrentTimeNanos();
         }
 
         return ran;
@@ -624,16 +628,12 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
 
     @Override
     public Future<?> shutdownGracefully(long quietPeriod, long timeout, TimeUnit unit) {
-        if (quietPeriod < 0) {
-            throw new IllegalArgumentException("quietPeriod: " + quietPeriod + " (expected >= 0)");
-        }
+        ObjectUtil.checkPositiveOrZero(quietPeriod, "quietPeriod");
         if (timeout < quietPeriod) {
             throw new IllegalArgumentException(
                     "timeout: " + timeout + " (expected >= quietPeriod (" + quietPeriod + "))");
         }
-        if (unit == null) {
-            throw new NullPointerException("unit");
-        }
+        ObjectUtil.checkNotNull(unit, "unit");
 
         if (isShuttingDown()) {
             return terminationFuture();
@@ -766,7 +766,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         cancelScheduledTasks();
 
         if (gracefulShutdownStartTime == 0) {
-            gracefulShutdownStartTime = ScheduledFutureTask.nanoTime();
+            gracefulShutdownStartTime = getCurrentTimeNanos();
         }
 
         if (runAllTasks() || runShutdownHooks()) {
@@ -785,7 +785,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
             return false;
         }
 
-        final long nanoTime = ScheduledFutureTask.nanoTime();
+        final long nanoTime = getCurrentTimeNanos();
 
         if (isShutdown() || nanoTime - gracefulShutdownStartTime > gracefulShutdownTimeout) {
             return true;
@@ -811,10 +811,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
 
     @Override
     public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
-        if (unit == null) {
-            throw new NullPointerException("unit");
-        }
-
+        ObjectUtil.checkNotNull(unit, "unit");
         if (inEventLoop()) {
             throw new IllegalStateException("cannot await termination of the current thread");
         }
@@ -826,12 +823,20 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
 
     @Override
     public void execute(Runnable task) {
-        ObjectUtil.checkNotNull(task, "task");
-        execute(task, !(task instanceof LazyRunnable) && wakesUpForTask(task));
+        execute0(task);
     }
 
     @Override
     public void lazyExecute(Runnable task) {
+        lazyExecute0(task);
+    }
+
+    private void execute0(@Schedule Runnable task) {
+        ObjectUtil.checkNotNull(task, "task");
+        execute(task, wakesUpForTask(task));
+    }
+
+    private void lazyExecute0(@Schedule Runnable task) {
         execute(ObjectUtil.checkNotNull(task, "task"), false);
     }
 
@@ -921,7 +926,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
     }
 
     /**
-     * @deprecated use {@link AbstractEventExecutor.LazyRunnable}
+     * @deprecated override {@link SingleThreadEventExecutor#wakesUpForTask} to re-create this behaviour
      */
     @Deprecated
     protected interface NonWakeupRunnable extends LazyRunnable { }
@@ -996,11 +1001,13 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
                 }
 
                 boolean success = false;
+                Throwable unexpectedException = null;
                 updateLastExecutionTime();
                 try {
                     SingleThreadEventExecutor.this.run();
                     success = true;
                 } catch (Throwable t) {
+                    unexpectedException = t;
                     logger.warn("Unexpected exception from an event executor: ", t);
                 } finally {
                     for (;;) {
@@ -1021,12 +1028,28 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
                     }
 
                     try {
-                        // Run all remaining tasks and shutdown hooks.
+                        // Run all remaining tasks and shutdown hooks. At this point the event loop
+                        // is in ST_SHUTTING_DOWN state still accepting tasks which is needed for
+                        // graceful shutdown with quietPeriod.
                         for (;;) {
                             if (confirmShutdown()) {
                                 break;
                             }
                         }
+
+                        // Now we want to make sure no more tasks can be added from this point. This is
+                        // achieved by switching the state. Any new tasks beyond this point will be rejected.
+                        for (;;) {
+                            int oldState = state;
+                            if (oldState >= ST_SHUTDOWN || STATE_UPDATER.compareAndSet(
+                                    SingleThreadEventExecutor.this, oldState, ST_SHUTDOWN)) {
+                                break;
+                            }
+                        }
+
+                        // We have the final set of tasks in the queue now, no more can be added, run all remaining.
+                        // No need to loop here, this is the final pass.
+                        confirmShutdown();
                     } finally {
                         try {
                             cleanup();
@@ -1039,16 +1062,37 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
 
                             STATE_UPDATER.set(SingleThreadEventExecutor.this, ST_TERMINATED);
                             threadLock.countDown();
-                            if (logger.isWarnEnabled() && !taskQueue.isEmpty()) {
+                            int numUserTasks = drainTasks();
+                            if (numUserTasks > 0 && logger.isWarnEnabled()) {
                                 logger.warn("An event executor terminated with " +
-                                        "non-empty task queue (" + taskQueue.size() + ')');
+                                        "non-empty task queue (" + numUserTasks + ')');
                             }
-                            terminationFuture.setSuccess(null);
+                            if (unexpectedException == null) {
+                                terminationFuture.setSuccess(null);
+                            } else {
+                                terminationFuture.setFailure(unexpectedException);
+                            }
                         }
                     }
                 }
             }
         });
+    }
+
+    final int drainTasks() {
+        int numTasks = 0;
+        for (;;) {
+            Runnable runnable = taskQueue.poll();
+            if (runnable == null) {
+                break;
+            }
+            // WAKEUP_TASK should be just discarded as these are added internally.
+            // The important bit is that we not have any user tasks left.
+            if (WAKEUP_TASK != runnable) {
+                numTasks++;
+            }
+        }
+        return numTasks;
     }
 
     private static final class DefaultThreadProperties implements ThreadProperties {

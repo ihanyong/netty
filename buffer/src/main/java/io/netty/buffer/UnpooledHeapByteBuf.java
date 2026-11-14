@@ -5,7 +5,7 @@
  * version 2.0 (the "License"); you may not use this file except in compliance
  * with the License. You may obtain a copy of the License at:
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *   https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
@@ -50,14 +50,12 @@ public class UnpooledHeapByteBuf extends AbstractReferenceCountedByteBuf {
     public UnpooledHeapByteBuf(ByteBufAllocator alloc, int initialCapacity, int maxCapacity) {
         super(maxCapacity);
 
-        checkNotNull(alloc, "alloc");
-
         if (initialCapacity > maxCapacity) {
             throw new IllegalArgumentException(String.format(
                     "initialCapacity(%d) > maxCapacity(%d)", initialCapacity, maxCapacity));
         }
 
-        this.alloc = alloc;
+        this.alloc = checkNotNull(alloc, "alloc");
         setArray(allocateArray(initialCapacity));
         setIndex(0, 0);
     }
@@ -73,7 +71,6 @@ public class UnpooledHeapByteBuf extends AbstractReferenceCountedByteBuf {
 
         checkNotNull(alloc, "alloc");
         checkNotNull(initialArray, "initialArray");
-
         if (initialArray.length > maxCapacity) {
             throw new IllegalArgumentException(String.format(
                     "initialCapacity(%d) > maxCapacity(%d)", initialArray.length, maxCapacity));
@@ -169,7 +166,7 @@ public class UnpooledHeapByteBuf extends AbstractReferenceCountedByteBuf {
     @Override
     public ByteBuf getBytes(int index, ByteBuf dst, int dstIndex, int length) {
         checkDstIndex(index, length, dstIndex, dst.capacity());
-        if (dst.hasMemoryAddress()) {
+        if (dst.hasMemoryAddress() && PlatformDependent.hasUnsafe()) {
             PlatformDependent.copyMemory(array, index, dst.memoryAddress() + dstIndex, length);
         } else if (dst.hasArray()) {
             getBytes(index, dst.array(), dst.arrayOffset() + dstIndex, length);
@@ -248,10 +245,10 @@ public class UnpooledHeapByteBuf extends AbstractReferenceCountedByteBuf {
     @Override
     public ByteBuf setBytes(int index, ByteBuf src, int srcIndex, int length) {
         checkSrcIndex(index, length, srcIndex, src.capacity());
-        if (src.hasMemoryAddress()) {
+        if (src.hasMemoryAddress() && PlatformDependent.hasUnsafe()) {
             PlatformDependent.copyMemory(src.memoryAddress() + srcIndex, array, index, length);
         } else  if (src.hasArray()) {
-            setBytes(index, src.array(), src.arrayOffset() + srcIndex, length);
+            System.arraycopy(src.array(), src.arrayOffset() + srcIndex, array, index, length);
         } else {
             src.getBytes(srcIndex, array, index, length);
         }
@@ -338,7 +335,7 @@ public class UnpooledHeapByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public short getShort(int index) {
-        ensureAccessible();
+        checkIndex(index, 2);
         return _getShort(index);
     }
 
@@ -349,7 +346,7 @@ public class UnpooledHeapByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public short getShortLE(int index) {
-        ensureAccessible();
+        checkIndex(index, 2);
         return _getShortLE(index);
     }
 
@@ -360,7 +357,7 @@ public class UnpooledHeapByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public int getUnsignedMedium(int index) {
-        ensureAccessible();
+        checkIndex(index, 3);
         return _getUnsignedMedium(index);
     }
 
@@ -371,7 +368,7 @@ public class UnpooledHeapByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public int getUnsignedMediumLE(int index) {
-        ensureAccessible();
+        checkIndex(index, 3);
         return _getUnsignedMediumLE(index);
     }
 
@@ -382,7 +379,7 @@ public class UnpooledHeapByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public int getInt(int index) {
-        ensureAccessible();
+        checkIndex(index, 4);
         return _getInt(index);
     }
 
@@ -393,7 +390,7 @@ public class UnpooledHeapByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public int getIntLE(int index) {
-        ensureAccessible();
+        checkIndex(index, 4);
         return _getIntLE(index);
     }
 
@@ -404,7 +401,7 @@ public class UnpooledHeapByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public long getLong(int index) {
-        ensureAccessible();
+        checkIndex(index, 8);
         return _getLong(index);
     }
 
@@ -415,7 +412,7 @@ public class UnpooledHeapByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public long getLongLE(int index) {
-        ensureAccessible();
+        checkIndex(index, 8);
         return _getLongLE(index);
     }
 
@@ -438,7 +435,7 @@ public class UnpooledHeapByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public ByteBuf setShort(int index, int value) {
-        ensureAccessible();
+        checkIndex(index, 2);
         _setShort(index, value);
         return this;
     }
@@ -450,7 +447,7 @@ public class UnpooledHeapByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public ByteBuf setShortLE(int index, int value) {
-        ensureAccessible();
+        checkIndex(index, 2);
         _setShortLE(index, value);
         return this;
     }
@@ -462,7 +459,7 @@ public class UnpooledHeapByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public ByteBuf setMedium(int index, int   value) {
-        ensureAccessible();
+        checkIndex(index, 3);
         _setMedium(index, value);
         return this;
     }
@@ -474,7 +471,7 @@ public class UnpooledHeapByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public ByteBuf setMediumLE(int index, int   value) {
-        ensureAccessible();
+        checkIndex(index, 3);
         _setMediumLE(index, value);
         return this;
     }
@@ -486,7 +483,7 @@ public class UnpooledHeapByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public ByteBuf setInt(int index, int   value) {
-        ensureAccessible();
+        checkIndex(index, 4);
         _setInt(index, value);
         return this;
     }
@@ -498,7 +495,7 @@ public class UnpooledHeapByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public ByteBuf setIntLE(int index, int   value) {
-        ensureAccessible();
+        checkIndex(index, 4);
         _setIntLE(index, value);
         return this;
     }
@@ -510,7 +507,7 @@ public class UnpooledHeapByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public ByteBuf setLong(int index, long  value) {
-        ensureAccessible();
+        checkIndex(index, 8);
         _setLong(index, value);
         return this;
     }
@@ -522,7 +519,7 @@ public class UnpooledHeapByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public ByteBuf setLongLE(int index, long  value) {
-        ensureAccessible();
+        checkIndex(index, 8);
         _setLongLE(index, value);
         return this;
     }
